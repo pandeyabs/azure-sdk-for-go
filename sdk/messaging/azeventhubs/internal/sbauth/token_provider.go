@@ -10,6 +10,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	azlog "github.com/Azure/azure-sdk-for-go/sdk/internal/log"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azeventhubs/v2/internal/auth"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azeventhubs/v2/internal/exported"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azeventhubs/v2/internal/sas"
@@ -85,14 +86,26 @@ func (tp *TokenProvider) GetTokenAsTokenProvider(uri string) (*singleUseTokenPro
 }
 
 func (tp *TokenProvider) getTokenImpl(uri string) (*auth.Token, time.Time, error) {
+	start := time.Now()
+	azlog.Writef(exported.EventAuth, "Starting token acquisition for URI: %s", uri)
+
 	if tp.sasTokenProvider != nil {
-		return tp.getSASToken(uri)
+		azlog.Writef(exported.EventAuth, "Using SAS token provider")
+		token, expiry, err := tp.getSASToken(uri)
+		azlog.Writef(exported.EventAuth, "SAS token acquisition completed in %v", time.Since(start))
+		return token, expiry, err
 	} else {
-		return tp.getAZCoreToken()
+		azlog.Writef(exported.EventAuth, "Using Azure Core token credential")
+		token, expiry, err := tp.getAZCoreToken()
+		azlog.Writef(exported.EventAuth, "Azure Core token acquisition completed in %v", time.Since(start))
+		return token, expiry, err
 	}
 }
 
 func (tpa *TokenProvider) getAZCoreToken() (*auth.Token, time.Time, error) {
+	azlog.Writef(exported.EventAuth, "Starting Azure Identity GetToken call for scope: https://eventhubs.azure.net//.default")
+	getTokenStart := time.Now()
+
 	// not sure if URI plays in here.
 	accessToken, err := tpa.tokenCred.GetToken(context.TODO(), policy.TokenRequestOptions{
 		Scopes: []string{
@@ -100,7 +113,11 @@ func (tpa *TokenProvider) getAZCoreToken() (*auth.Token, time.Time, error) {
 		},
 	})
 
+	getTokenDuration := time.Since(getTokenStart)
+	azlog.Writef(exported.EventAuth, "Azure Identity GetToken call completed in %v", getTokenDuration)
+
 	if err != nil {
+		azlog.Writef(exported.EventAuth, "Azure Identity GetToken call failed after %v: %s", getTokenDuration, err)
 		return nil, time.Time{}, err
 	}
 
