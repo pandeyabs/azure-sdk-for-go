@@ -157,6 +157,7 @@ func (l *Links[LinkT]) newLinkState(ctx context.Context, partitionID string) (*l
 	}
 
 	ls.cancelAuth = cancelAuth
+	azlog.Writef(exported.EventConn, "(%s): Successfully negotiated claim for partition ID '%s'", ls.String(), partitionID)
 
 	session, connID, err := l.ns.NewAMQPSession(ctx)
 
@@ -168,6 +169,7 @@ func (l *Links[LinkT]) newLinkState(ctx context.Context, partitionID string) (*l
 
 	ls.session = session
 	ls.connID = connID
+	azlog.Writef(exported.EventConn, "(%s): Successfully created AMQP session for partition ID '%s'", ls.String(), partitionID)
 
 	tmpLink, err := l.newLinkFn(ctx, session, l.entityPathFn(partitionID), partitionID)
 
@@ -184,11 +186,13 @@ func (l *Links[LinkT]) newLinkState(ctx context.Context, partitionID string) (*l
 }
 
 func (l *Links[LinkT]) newManagementLinkState(ctx context.Context) (*linkState[amqpwrap.RPCLink], error) {
+	azlog.Writef(exported.EventConn, "Creating management link")
 	ls := &linkState[amqpwrap.RPCLink]{}
 
 	cancelAuth, _, err := l.ns.NegotiateClaim(ctx, l.managementPath)
 
 	if err != nil {
+		azlog.Writef(exported.EventConn, "(%s): Failed to negotiate claim for management link: %s", ls.String(), err)
 		return nil, err
 	}
 
@@ -197,6 +201,7 @@ func (l *Links[LinkT]) newManagementLinkState(ctx context.Context) (*linkState[a
 	tmpRPCLink, connID, err := l.ns.NewRPCLink(ctx, "$management")
 
 	if err != nil {
+		azlog.Writef(exported.EventConn, "(%s): Failed to create management link: %s", ls.String(), err)
 		_ = ls.Close(ctx)
 		return nil, err
 	}
@@ -204,6 +209,7 @@ func (l *Links[LinkT]) newManagementLinkState(ctx context.Context) (*linkState[a
 	ls.connID = connID
 	ls.link = &tmpRPCLink
 
+	azlog.Writef(exported.EventConn, "(%s): Successfully created management link", ls.String())
 	return ls, nil
 }
 
@@ -212,6 +218,7 @@ func (l *Links[LinkT]) Close(ctx context.Context) error {
 }
 
 func (l *Links[LinkT]) closeLinks(ctx context.Context, permanent bool) error {
+	azlog.Writef(exported.EventConn, "Closing all links (permanent: %t)", permanent)
 	cancelled := false
 
 	// clear out the management link
@@ -256,11 +263,13 @@ func (l *Links[LinkT]) closeLinks(ctx context.Context, permanent bool) error {
 	}
 
 	if cancelled {
+		azlog.Writef(exported.EventConn, "Some links failed to close cleanly")
 		// this is the only kind of error I'd consider usable from Close() - it'll indicate
 		// that some of the links haven't been cleanly closed.
 		return ctx.Err()
 	}
 
+	azlog.Writef(exported.EventConn, "All links closed successfully")
 	return nil
 }
 
@@ -301,6 +310,7 @@ func (l *Links[LinkT]) closePartitionLinkIfMatch(ctx context.Context, partitionI
 		return nil
 	}
 
+	azlog.Writef(exported.EventConn, "(%s): Closing link for partition ID '%s'", current.String(), partitionID)
 	delete(l.links, partitionID)
 	return current.Close(ctx)
 }
@@ -310,6 +320,7 @@ func (l *Links[LinkT]) closeManagementLinkIfMatch(ctx context.Context, linkName 
 	defer l.managementLinkMu.Unlock()
 
 	if l.managementLink != nil && l.managementLink.Link().LinkName() == linkName {
+		azlog.Writef(exported.EventConn, "(%s): Closing management link", l.managementLink.String())
 		err := l.managementLink.Close(ctx)
 		l.managementLink = nil
 		return err
@@ -361,6 +372,7 @@ func (ls *linkState[LinkT]) String() string {
 // NOTE: this avoids any issues where closing fails on the broker-side or
 // locally and we leak a goroutine.
 func (ls *linkState[LinkT]) Close(ctx context.Context) error {
+	azlog.Writef(exported.EventConn, "(%s): Closing link state", ls.String())
 	if ls.cancelAuth != nil {
 		ls.cancelAuth()
 	}
@@ -371,10 +383,19 @@ func (ls *linkState[LinkT]) Close(ctx context.Context) error {
 		// we're more interested in a link failing to close than we are in
 		// the session.
 		linkCloseErr = ls.Link().Close(ctx)
+		if linkCloseErr != nil {
+			azlog.Writef(exported.EventConn, "(%s): Failed to close AMQP link: %s", ls.String(), linkCloseErr)
+		} else {
+			azlog.Writef(exported.EventConn, "(%s): Successfully closed AMQP link", ls.String())
+		}
 	}
 
 	if ls.session != nil {
-		_ = ls.session.Close(ctx)
+		if sessionErr := ls.session.Close(ctx); sessionErr != nil {
+			azlog.Writef(exported.EventConn, "(%s): Failed to close AMQP session: %s", ls.String(), sessionErr)
+		} else {
+			azlog.Writef(exported.EventConn, "(%s): Successfully closed AMQP session", ls.String())
+		}
 	}
 
 	return linkCloseErr
