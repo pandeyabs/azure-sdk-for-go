@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"time"
 
+	azlog "github.com/Azure/azure-sdk-for-go/sdk/azcore/log"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	azruntime "github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/internal/errorinfo"
+	"github.com/Azure/azure-sdk-for-go/sdk/internal/log"
 )
 
 type clientRetryPolicy struct {
@@ -43,9 +45,13 @@ func (p *clientRetryPolicy) Do(req *policy.Request) (*http.Response, error) {
 		resolvedEndpoint := p.gem.ResolveServiceEndpoint(retryContext.retryCount, o.resourceType, o.isWriteOperation, retryContext.useWriteEndpoint)
 		req.Raw().Host = resolvedEndpoint.Host
 		req.Raw().URL.Host = resolvedEndpoint.Host
+		log.Write(azlog.EventRequest, fmt.Sprintf("\n===== Request Being Sent =====\nRetry Count: %d\nResource Type: %v\nIs Write Operation: %v\nUse Write Endpoint: %v\nResolved Host: %s\nRequest URL: %s\n=====\n",
+			retryContext.retryCount, o.resourceType, o.isWriteOperation, retryContext.useWriteEndpoint, resolvedEndpoint.Host, req.Raw().URL.String()))
+
 		response, err := req.Next() // err can happen in weird scenarios (connectivity, etc)
 		if err != nil {
 			if p.isNetworkConnectionError(err) {
+				log.Write(azlog.EventRetryPolicy, fmt.Sprintf("\n===== Network Connection Error =====\nError: %v\nRetry Count: %d\n=====\n", err, retryContext.retryCount))
 				shouldRetry, errRetry := p.attemptRetryOnNetworkError(req, &retryContext)
 				if errRetry != nil {
 					return nil, errRetry
@@ -64,6 +70,8 @@ func (p *clientRetryPolicy) Do(req *policy.Request) (*http.Response, error) {
 		}
 		subStatus := response.Header.Get(cosmosHeaderSubstatus)
 		if p.shouldRetryStatus(response.StatusCode, subStatus) {
+			log.Write(azlog.EventRetryPolicy, fmt.Sprintf("\n===== Retryable Status Detected =====\nStatus Code: %d\nSub-Status: %s\nRetry Count: %d\n=====\n",
+				response.StatusCode, subStatus, retryContext.retryCount))
 			retryContext.useWriteEndpoint = false
 			if response.StatusCode == http.StatusForbidden {
 				shouldRetry, err := p.attemptRetryOnEndpointFailure(req, o.isWriteOperation, &retryContext)
@@ -90,6 +98,8 @@ func (p *clientRetryPolicy) Do(req *policy.Request) (*http.Response, error) {
 			continue
 		}
 
+		log.Write(azlog.EventResponse, fmt.Sprintf("\n===== Successful Response =====\nStatus Code: %d\nSub-Status: %s\nHost: %s\n=====\n",
+			response.StatusCode, subStatus, req.Raw().Host))
 		return response, err
 	}
 

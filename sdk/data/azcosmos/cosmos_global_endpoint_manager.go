@@ -47,6 +47,9 @@ func newGlobalEndpointManager(clientEndpoint string, pipeline azruntime.Pipeline
 		lastUpdateTime:      time.Time{},
 	}
 
+	log.Write(azlog.EventRequest, fmt.Sprintf("\n===== Global Endpoint Manager Initialized =====\nClient Endpoint: %s\nPreferred Locations: %v\nCross-Region Retries Enabled: %v\nRefresh Interval: %v\n=====\n",
+		clientEndpoint, preferredLocations, enableCrossRegionRetries, refreshTimeInterval))
+
 	return gem, nil
 }
 
@@ -93,7 +96,10 @@ func (gem *globalEndpointManager) shouldRefresh() bool {
 }
 
 func (gem *globalEndpointManager) ResolveServiceEndpoint(locationIndex int, resourceType resourceType, isWriteOperation, useWriteEndpoint bool) url.URL {
-	return gem.locationCache.resolveServiceEndpoint(locationIndex, resourceType, isWriteOperation, useWriteEndpoint)
+	endpoint := gem.locationCache.resolveServiceEndpoint(locationIndex, resourceType, isWriteOperation, useWriteEndpoint)
+	log.Write(azlog.EventRequest, fmt.Sprintf("\n===== Endpoint Resolution =====\nLocationIndex: %d\nResourceType: %v\nIsWriteOperation: %v\nUseWriteEndpoint: %v\nResolved Endpoint: %s\n=====\n",
+		locationIndex, resourceType, isWriteOperation, useWriteEndpoint, endpoint.String()))
+	return endpoint
 }
 
 func (gem *globalEndpointManager) Update(ctx context.Context, forceRefresh bool) error {

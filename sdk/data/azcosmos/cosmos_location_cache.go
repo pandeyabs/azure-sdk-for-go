@@ -8,6 +8,9 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	azlog "github.com/Azure/azure-sdk-for-go/sdk/azcore/log"
+	"github.com/Azure/azure-sdk-for-go/sdk/internal/log"
 )
 
 const defaultExpirationTime time.Duration = time.Minute * 5
@@ -94,6 +97,8 @@ func (lc *locationCache) update(writeLocations []accountRegion, readLocations []
 		}
 		nextLoc.availReadEndpointsByLocation = availReadEndpointsByLocation
 		nextLoc.availReadLocations = availReadLocations
+		log.Write(azlog.EventResponse, fmt.Sprintf("\n===== Updated Read Locations =====\nLocations: %v\nEndpoints: %v\n=====\n",
+			availReadLocations, availReadEndpointsByLocation))
 	}
 
 	if writeLocations != nil {
@@ -103,23 +108,33 @@ func (lc *locationCache) update(writeLocations []accountRegion, readLocations []
 		}
 		nextLoc.availWriteEndpointsByLocation = availWriteEndpointsByLocation
 		nextLoc.availWriteLocations = availWriteLocations
+		log.Write(azlog.EventResponse, fmt.Sprintf("\n===== Updated Write Locations =====\nLocations: %v\nEndpoints: %v\n=====\n",
+			availWriteLocations, availWriteEndpointsByLocation))
 	}
 
 	nextLoc.writeEndpoints = lc.getPrefAvailableEndpoints(nextLoc.availWriteEndpointsByLocation, nextLoc.availWriteLocations, write, lc.defaultEndpoint)
 	nextLoc.readEndpoints = lc.getPrefAvailableEndpoints(nextLoc.availReadEndpointsByLocation, nextLoc.availReadLocations, read, nextLoc.writeEndpoints[0])
 	lc.lastUpdateTime = time.Now()
 	lc.locationInfo = nextLoc
-	// TODO: log
+	log.Write(azlog.EventResponse, fmt.Sprintf("\n===== Location Cache Updated =====\nPreferred Locations: %v\nWrite Endpoints (ordered): %v\nRead Endpoints (ordered): %v\nMulti-Master Enabled: %v\nDefault Endpoint: %s\n=====\n",
+		nextLoc.prefLocations, nextLoc.writeEndpoints, nextLoc.readEndpoints, lc.enableMultipleWriteLocations, lc.defaultEndpoint.String()))
 	return nil
 }
 
 func (lc *locationCache) resolveServiceEndpoint(locationIndex int, resourceType resourceType, isWriteOperation, useWriteEndpoint bool) url.URL {
+	log.Write(azlog.EventRequest, fmt.Sprintf("\n===== Resolving Service Endpoint =====\nLocationIndex: %d\nResourceType: %v\nIsWriteOperation: %v\nUseWriteEndpoint: %v\nCanUseMultipleWriteLocs: %v\n",
+		locationIndex, resourceType, isWriteOperation, useWriteEndpoint, lc.canUseMultipleWriteLocsToRoute(resourceType)))
+
 	if (isWriteOperation || useWriteEndpoint) && !lc.canUseMultipleWriteLocsToRoute(resourceType) {
 		if lc.enableCrossRegionRetries && len(lc.locationInfo.availWriteLocations) > 0 {
 			locationIndex = min(locationIndex%2, len(lc.locationInfo.availWriteLocations)-1)
 			writeLocation := lc.locationInfo.availWriteLocations[locationIndex]
-			return lc.locationInfo.availWriteEndpointsByLocation[writeLocation]
+			endpoint := lc.locationInfo.availWriteEndpointsByLocation[writeLocation]
+			log.Write(azlog.EventRequest, fmt.Sprintf("===== Using Single Write Location =====\nWrite Location: %s\nEndpoint: %s\n=====\n",
+				writeLocation, endpoint.String()))
+			return endpoint
 		}
+		log.Write(azlog.EventRequest, fmt.Sprintf("===== Using Default Endpoint =====\nEndpoint: %s\n=====\n", lc.defaultEndpoint.String()))
 		return lc.defaultEndpoint
 	}
 
@@ -127,7 +142,11 @@ func (lc *locationCache) resolveServiceEndpoint(locationIndex int, resourceType 
 	if isWriteOperation {
 		endpoints = lc.locationInfo.writeEndpoints
 	}
-	return endpoints[locationIndex%len(endpoints)]
+	selectedIndex := locationIndex % len(endpoints)
+	selectedEndpoint := endpoints[selectedIndex]
+	log.Write(azlog.EventRequest, fmt.Sprintf("===== Selected Endpoint from List =====\nOperation: %s\nAvailable Endpoints: %v\nSelected Index: %d\nSelected Endpoint: %s\n=====\n",
+		map[bool]string{true: "WRITE", false: "READ"}[isWriteOperation], endpoints, selectedIndex, selectedEndpoint.String()))
+	return selectedEndpoint
 }
 
 func (lc *locationCache) canUseMultipleWriteLocsToRoute(resourceType resourceType) bool {
@@ -202,12 +221,16 @@ func (lc *locationCache) markEndpointUnavailable(endpoint url.URL, op requestedO
 		info.lastCheckTime = now
 		info.unavailableOps |= op
 		lc.locationUnavailabilityInfoMap[endpoint] = info
+		log.Write(azlog.EventRetryPolicy, fmt.Sprintf("\n===== Endpoint Marked Unavailable (Updated) =====\nEndpoint: %s\nOperation: %v\nCombined Unavailable Ops: %v\n=====\n",
+			endpoint.String(), op, info.unavailableOps))
 	} else {
 		info = locationUnavailabilityInfo{
 			lastCheckTime:  now,
 			unavailableOps: op,
 		}
 		lc.locationUnavailabilityInfoMap[endpoint] = info
+		log.Write(azlog.EventRetryPolicy, fmt.Sprintf("\n===== Endpoint Marked Unavailable (New) =====\nEndpoint: %s\nOperation: %v\n=====\n",
+			endpoint.String(), op))
 	}
 	lc.mapMutex.Unlock()
 	err := lc.update(nil, nil, nil, nil)
@@ -241,30 +264,45 @@ func (lc *locationCache) isEndpointUnavailable(endpoint url.URL, ops requestedOp
 
 func (lc *locationCache) getPrefAvailableEndpoints(endpointsByLoc map[string]url.URL, locs []string, availOps requestedOperations, fallbackEndpoint url.URL) []url.URL {
 	endpoints := make([]url.URL, 0)
+	log.Write(azlog.EventResponse, fmt.Sprintf("\n===== Building Preferred Available Endpoints =====\nPreferred Locations: %v\nAvailable Locations: %v\nOperation Type: %v\nFallback Endpoint: %s\nCross-Region Retries Enabled: %v\n",
+		lc.locationInfo.prefLocations, locs, availOps, fallbackEndpoint.String(), lc.enableCrossRegionRetries))
+
 	if lc.enableCrossRegionRetries {
 		if lc.canUseMultipleWriteLocs() || availOps&read != 0 {
 			unavailEndpoints := make([]url.URL, 0)
 			unavailEndpoints = append(unavailEndpoints, fallbackEndpoint)
+			log.Write(azlog.EventResponse, fmt.Sprintf("===== Fallback endpoint added to unavailable list: %s\n", fallbackEndpoint.String()))
+
 			for _, loc := range lc.locationInfo.prefLocations {
 				if endpoint, ok := endpointsByLoc[loc]; ok && endpoint != fallbackEndpoint {
 					if lc.isEndpointUnavailable(endpoint, availOps) {
 						unavailEndpoints = append(unavailEndpoints, endpoint)
+						log.Write(azlog.EventResponse, fmt.Sprintf("===== Location '%s' endpoint %s is UNAVAILABLE, added to unavailable list\n", loc, endpoint.String()))
 					} else {
 						endpoints = append(endpoints, endpoint)
+						log.Write(azlog.EventResponse, fmt.Sprintf("===== Location '%s' endpoint %s is AVAILABLE, added to available list\n", loc, endpoint.String()))
 					}
+				} else if !ok {
+					log.Write(azlog.EventResponse, fmt.Sprintf("===== Location '%s' not found in endpoints map\n", loc))
+				} else {
+					log.Write(azlog.EventResponse, fmt.Sprintf("===== Location '%s' endpoint matches fallback, skipping\n", loc))
 				}
 			}
 			endpoints = append(endpoints, unavailEndpoints...)
+			log.Write(azlog.EventResponse, fmt.Sprintf("===== Final Endpoint Order =====\nAvailable Endpoints (preferred): %v\nUnavailable Endpoints (fallback): %v\nCombined Order: %v\n=====\n",
+				endpoints[:len(endpoints)-len(unavailEndpoints)], unavailEndpoints, endpoints))
 		} else {
 			for _, loc := range locs {
 				if endpoint, ok := endpointsByLoc[loc]; ok && loc != "" {
 					endpoints = append(endpoints, endpoint)
 				}
 			}
+			log.Write(azlog.EventResponse, fmt.Sprintf("===== Using available locations (no multi-write) =====\nEndpoints: %v\n=====\n", endpoints))
 		}
 	}
 	if len(endpoints) == 0 {
 		endpoints = append(endpoints, fallbackEndpoint)
+		log.Write(azlog.EventResponse, fmt.Sprintf("===== No endpoints found, using fallback =====\nFallback: %s\n=====\n", fallbackEndpoint.String()))
 	}
 	return endpoints
 }
