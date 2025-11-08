@@ -88,7 +88,11 @@ func (gem *globalEndpointManager) RefreshStaleEndpoints() {
 func (gem *globalEndpointManager) ShouldRefresh() bool {
 	gem.gemMutex.RLock()
 	defer gem.gemMutex.RUnlock()
-	return gem.shouldRefresh()
+	shouldRefresh := gem.shouldRefresh()
+	timeSinceUpdate := time.Since(gem.lastUpdateTime)
+	log.Write(azlog.EventRequest, fmt.Sprintf("\n===== ShouldRefresh Check =====\nTime Since Last Update: %v\nRefresh Interval: %v\nShould Refresh: %v\nLast Update Time: %v\n=====\n",
+		timeSinceUpdate, gem.refreshTimeInterval, shouldRefresh, gem.lastUpdateTime))
+	return shouldRefresh
 }
 
 func (gem *globalEndpointManager) shouldRefresh() bool {
